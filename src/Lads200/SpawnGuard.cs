@@ -27,6 +27,8 @@ static class SpawnGuard
     internal static readonly List<PatchTarget> PatchTargets = new();
 
     static float firstAttemptAt = float.NaN, lastRetryAt = float.NegativeInfinity;
+    const float StatusIntervalS = 10f;   // v1.0.6: "still waiting" heartbeat so a never-registering clone is visible in the log
+    static float lastStatusAt = float.NegativeInfinity;
 
     /// <summary>Called from Lads200Plugin.Update every frame; retries at most twice a second (CenturionLog's rate-limit idea).</summary>
     internal static void Tick()
@@ -46,11 +48,22 @@ static class SpawnGuard
 
         try
         {
-            LadsClone.TryRegister();
+            if (!LadsClone.TryRegister())
+            {
+                // v1.0.6: the silent failure mode - the retry loop kept returning false (source never found) and only ever
+                // logged "feature off" at the 120 s give-up. Now every 10 s until it succeeds or gives up.
+                long elapsed = (long)(now - firstAttemptAt);
+                if (now - lastStatusAt > StatusIntervalS)
+                {
+                    lastStatusAt = now;
+                    Lads200Plugin.Log.Warning($"still waiting: stock MSV LADS not in Encyclopedia.Lookup yet ({elapsed} s of {GiveUpS:F0})");
+                }
+            }
         }
         catch (Exception e)
         {
             // A member moved in a game update: do not spam retries, stand down with a clear line (PatchTarget.cs style).
+            // v1.0.6: include the exception type name - before, this line was the ONLY trace an aborted registration left.
             Lads200Plugin.DisableFeature($"{e.GetType().Name}: {e.Message}");
         }
     }
