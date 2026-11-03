@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- Same shape as the MRB-100 Centurion's csproj: netstandard2.1 BepInEx plugin, game DLLs referenced Private=false. -->
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <AssemblyName>Lads200</AssemblyName>
+    <RootNamespace>Lads200</RootNamespace>
+    <Version>1.0.0</Version>
+    <LangVersion>latest</LangVersion>
+    <Deterministic>true</Deterministic>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <!-- Assembly-CSharp transitively references facades this plugin never uses (Centurion's own suppression). -->
+    <NoWarn>$(NoWarn);MSB3277</NoWarn>
+
+    <!-- Point at your install: dotnet build -p:GameDir="C:\...\Nuclear Option"  or set NUCLEAR_OPTION_DIR. -->
+    <GameDir Condition="'$(GameDir)' == '' and '$(NUCLEAR_OPTION_DIR)' != ''">$(NUCLEAR_OPTION_DIR)</GameDir>
+    <GameDir Condition="'$(GameDir)' == ''">D:\SteamLibrary\steamapps\common\Nuclear Option</GameDir>
+    <Managed>$(GameDir)\NuclearOption_Data\Managed</Managed>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="BepInEx" HintPath="$(GameDir)\BepInEx\core\BepInEx.dll" Private="false" />
+    <Reference Include="0Harmony" HintPath="$(GameDir)\BepInEx\core\0Harmony.dll" Private="false" />
+    <Reference Include="Assembly-CSharp" HintPath="$(Managed)\Assembly-CSharp.dll" Private="false" />
+    <Reference Include="UnityEngine" HintPath="$(Managed)\UnityEngine.dll" Private="false" />
+    <Reference Include="UnityEngine.CoreModule" HintPath="$(Managed)\UnityEngine.CoreModule.dll" Private="false" />
+  </ItemGroup>
+
+  <Target Name="ValidateGameDir" BeforeTargets="ResolveReferences">
+    <Error Condition="!Exists('$(Managed)\Assembly-CSharp.dll')" Text="Nuclear Option not found at GameDir '$(GameDir)'. Pass -p:GameDir=... or set NUCLEAR_OPTION_DIR." />
+    <Error Condition="!Exists('$(GameDir)\BepInEx\core\BepInEx.dll')" Text="BepInEx 5 is not installed in '$(GameDir)'." />
+  </Target>
+</Project>
