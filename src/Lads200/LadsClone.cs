@@ -51,6 +51,43 @@ static class LadsClone
     static UnitDefinition cloneDef;      // our cloned definition (destroyed again on rollback)
     static bool registered;
 
+    /// <summary>
+    /// v1.0.6: a mod unit is only ever *cloned* from a stock UnitDefinition - nothing in this game spawns one directly.
+    /// The encyclopedia lists are typed (List&lt;VehicleDefinition&gt;, List&lt;AircraftDefinition&gt;, ...) and Object.Instantiate
+    /// of a ScriptableObject asset makes a plain UnitDefinition, which an IList.Add would reject with ArgumentException -
+    /// that exception used to hit Tick's catch and stand the whole feature down before anything was logged. So we walk the
+    /// source's class chain until Instantiate returns something assignable to the list element type (Unity clones at the
+    /// concrete type where the serialized data actually lives), and fall back to MemberwiseClone for exotic hierarchies.
+    /// </summary>
+    static UnitDefinition CloneDefinition(UnitDefinition source)
+    {
+        for (Type t = source.GetType(); t != null && typeof(UnitDefinition).IsAssignableFrom(t) && t != typeof(object); t = t.BaseType)
+        {
+            if (t.IsAbstract || t.IsInterface) continue;
+            try
+            {
+                UnityEngine.Object proto = UnityEngine.Object.Instantiate(source, null, false);
+                proto.name = NewKey;
+                if (proto is UnitDefinition ud && t.IsInstanceOfType(ud)) return ud;
+                UnityEngine.Object.Destroy(proto); // wrong runtime type: retry against the next class in the chain
+            }
+            catch { /* keep walking */ }
+        }
+
+        try
+        {
+            object shallow = source.MemberwiseClone(); // not a Unity "Object" clone: fine as an in-memory catalog row
+            ((UnitDefinition)shallow).name = NewKey;
+            return (UnitDefinition)shallow;
+        }
+        catch
+        {
+            UnitDefinition last = UnityEngine.Object.Instantiate(source); // let the caller's catch report it
+            last.name = NewKey;
+            return last;
+        }
+    }
+
     /// <summary>True once the clone is in Encyclopedia.Lookup under <see cref="NewKey"/>.</summary>
     public static bool IsRegistered => registered;
 
@@ -85,8 +122,8 @@ static class LadsClone
 
             // Clone the definition by hand: every instance field of the concrete type and each base up to ScriptableObject,
             // including the private backing fields Unity serializes (jsonKey, unitName, emptyCost, prefab, ...).
-            UnitDefinition def = UnityEngine.Object.Instantiate(source);
-            def.name = NewKey;
+            // v1.0.6: typed clone (see CloneDefinition) so it can join the game's List<VehicleDefinition> catalog.
+            UnitDefinition def = CloneDefinition(source);
 
             // Restamp identity + price on the cloned definition...
             SetFirstFound(def.GetType(), def, KeyNames, NewKey);
@@ -364,11 +401,32 @@ static class LadsClone
 
     static void AddToTypedList(UnitDefinition source, UnitDefinition def)
     {
-        foreach (IList list in ListsContaining(source))
+        ModLog log = Log;
+        int joined = 0;
+        // v1.0.6: join by *key* as well as by reference. The shop catalog (Encyclopedia.i.vehicles) and the lookup can be
+        // filled from different sources in some builds, so "the source is in this list" alone was not enough to guarantee
+        // we land next to it. Any definition-typed list whose entries carry our source's jsonKey gets our clone too.
+        string sourceKey = GetStringField(source.GetType(), "jsonKey", source);
+        foreach (IList list in ListsForSource(source, sourceKey))
         {
-            if (!list.Contains(def)) list.Add(def);
+            if (!list.Contains(def))
+            {
+                try
+                {
+                    list.Add(def);
+                    joined++;
+                }
+                catch (Exception e)
+                {
+                    // Typed List<VehicleDefinition> rejecting a plain UnitDefinition must never kill the feature: skip the
+                    // list, say so once, keep the rest of the registration.
+                    log.StageOnce($"add-reject-{ShortListName(list)}", $"could not add the clone to {ShortListName(list)} ({e.GetType().Name}); that menu will not show it");
+                }
+            }
+            else joined++;
         }
 
+        log.StageOnce("lists-joined", $"clone joined {joined} Encyclopedia list(s)");
         AddMetadataRows(source, def);
     }
 
@@ -540,6 +598,54 @@ static class LadsClone
         {
             if (list.Contains(source)) yield return list;
         }
+    }
+
+    /// <summary>
+    /// v1.0.6: every definition-typed Encyclopedia list that is a "home" for the source: it either contains the source by
+    /// reference, or its entries carry the source's jsonKey (covers builds where the catalog and the lookup are filled from
+    /// different passes). Non-definition lists (UnitType rows etc.) are handled by AddMetadataRows instead.
+    /// </summary>
+    static IEnumerable<IList> ListsForSource(UnitDefinition source, string sourceKey)
+    {
+        var seen = new HashSet<IList>(ReferenceComparer.Instance);
+        foreach (IList list in AllEncyclopediaLists())
+        {
+            if (!IsDefinitionList(list) || !seen.Add(list)) continue;
+            bool home = false;
+            foreach (object item in list)
+            {
+                if (item == null) continue;
+                if (ReferenceEquals(item, source)) { home = true; break; }
+                if (!string.IsNullOrEmpty(sourceKey) && item.GetType().Name.EndsWith("Definition", StringComparison.Ordinal)
+                    && string.Equals(GetStringField(item.GetType(), "jsonKey", item), sourceKey, StringComparison.Ordinal))
+                {
+                    home = true;
+                    break;
+                }
+            }
+
+            if (home) yield return list;
+        }
+    }
+
+    /// <summary>A list whose element type derives from UnitDefinition (checked by name: no compile-time game types here).</summary>
+    static bool IsDefinitionList(IList list)
+    {
+        Type itemType = null;
+        foreach (Type g in list.GetType().GetInterfaces())
+        {
+            if (g.IsGenericType && g.GetGenericTypeDefinition() == typeof(IList<>)) { itemType = g.GetGenericArguments()[0]; break; }
+        }
+
+        if (itemType == null) itemType = list.GetType(); // non-generic lists: fall back to element inspection below
+        return itemType.Name.EndsWith("Definition", StringComparison.Ordinal) || itemType == typeof(UnitDefinition);
+    }
+
+    sealed class ReferenceComparer : IEqualityComparer<IList>
+    {
+        public static readonly ReferenceComparer Instance = new ReferenceComparer();
+        public bool Equals(IList a, IList b) => ReferenceEquals(a, b);
+        public int GetHashCode(IList l) => System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(l);
     }
 
     static IEnumerable<IList> TypedLists()

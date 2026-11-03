@@ -19,7 +19,7 @@ namespace Lads200;
 public sealed class Lads200Plugin : BaseUnityPlugin
 {
     public const string Guid = "razor.lads200";
-    public const string Version = "1.0.5";
+    public const string Version = "1.0.6";
 
     internal static ModLog Log { get; private set; }
     internal static bool FeatureOff;

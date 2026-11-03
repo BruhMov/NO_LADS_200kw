@@ -1,0 +1,260 @@
+From ac6f9956ddb20c4ee44a30aa5c1925353c47077c Mon Sep 17 00:00:00 2001
+From: "qwen.ai[bot]" <qwenlm-intl@service.alibaba.com>
+Date: Tue, 3 Nov 2026 22:30:11 +0000
+Subject: [PATCH] v1.0.6: typed definition clone so the clone can join
+ Encyclopedia.i.vehicles (List<VehicleDefinition>); key-based list joining;
+ per-list add failure no longer kills registration; still-waiting heartbeat
+ log
+
+---
+ README.md                    |   7 ++-
+ src/Lads200/Lads200.csproj   |   2 +-
+ src/Lads200/Lads200Plugin.cs |   2 +-
+ src/Lads200/LadsClone.cs     | 114 +++++++++++++++++++++++++++++++++--
+ src/Lads200/SpawnGuard.cs    |  15 ++++-
+ 5 files changed, 130 insertions(+), 10 deletions(-)
+
+diff --git a/README.md b/README.md
+index 3da2ba5..a9affad 100644
+--- a/README.md
++++ b/README.md
+@@ -14,7 +14,7 @@ feature off instead of crashing the plugin), same `[Mod]`-prefixed logger discip
+ |---|---|
+ | `Lads200.csproj` | Mirrors Centurion's csproj: `Private=false` references into your game's `Assembly-CSharp.dll`, `UnityEngine*.dll` and BepInEx's `BepInEx.dll` / `0Harmony.dll`. |
+ | `Lads200Plugin.cs` | `[BepInPlugin("razor.lads200", ...)]` entry point; config entries (`Enabled`, `UnitName`, `UnitKey`, `SourceKeyOverride`, `CostDollars=10000000`, `PowerKw=200`); installs Harmony patches; drives registration from `Update`. |
+-| `LadsClone.cs` | The heart: finds the stock MSV LADS in `Encyclopedia.Lookup` (exact key, then tolerant case/underscore match, then unitName; logs candidate keys once if it never finds one), `Object.Instantiate`-clones its definition *and* its prefab (`unitPrefab` first, then `prefab` — field name verified against the PlayableVehicles repo), sets `jsonKey="MSV_LADS_200"`, `unitName="MSV LADS 200"`, **every** cost member that exists (`emptyCost`/`cost`/`value`) = 10,000,000 (encyclopedia shows one, PlayableVehicles charges `definition.value + ammo`), sets each `Laser.power` 80→200 kW, tints the beam blue, raises `PowerSupply.maxPower` ≥200 kW, joins every Encyclopedia list its source is in plus a cloned row in the `UnitType` category lists (`vehicleTypes` etc.), and runs a one-shot `menu-check:` diagnostic. Clean rollback via `Disable()`. |
++| `LadsClone.cs` | The heart: finds the stock MSV LADS in `Encyclopedia.Lookup` (exact key, then tolerant case/underscore match, then unitName; logs candidate keys once if it never finds one), `Object.Instantiate`-clones its definition *and* its prefab (`unitPrefab` first, then `prefab` — field name verified against the PlayableVehicles repo), sets `jsonKey="MSV_LADS_200"`, `unitName="MSV LADS 200"`, **every** cost member that exists (`emptyCost`/`cost`/`value`) = 10,000,000 (encyclopedia shows one, PlayableVehicles charges `definition.value + ammo`), sets each `Laser.power` 80→200 kW, tints the beam blue, raises `PowerSupply.maxPower` ≥200 kW, clones the definition at the source's concrete type (v1.0.6: `List<VehicleDefinition>` catalogs reject a plain UnitDefinition — that ArgumentException used to abort registration), joins every Encyclopedia list whose entries reference the source or carry its jsonKey, plus a cloned row in the `UnitType` category lists (`vehicleTypes` etc.), and runs a one-shot `menu-check:` diagnostic. Clean rollback via `Disable()`. |
+ | `SpawnGuard.cs` | Retry loop (twice a second until the encyclopedia loads, gives up after 120 s) plus the postfix on every lifecycle hook SpawnHooks found. v1.0.5: the postfix only registers when the spawned Unit already carries a definition key, so Awake/OnEnable of an unspawned preview/pool instance of the stock prefab can never stamp the shared stock definition ("stock LADS turned into the 200" guard). |
+ | `SpawnHooks.cs` | Patch discovery (v1.0.4): the v1.0.3 substring probe (formerly `SpawnProbe.cs`) found **0** spawn hooks because this game build's `Unit` declares no method containing "spawn"/"instantiate" — it dumped every Unit method into LogOutput.txt as a diagnostic. This file pins the real hooks read off that dump (`RegisterUnit`, `RegisterOnGridAsync`, `InitializeUnit`, plus the lifecycle callbacks `Awake`/`OnEnable`/`Start`/`OnStartServer`), validates each at runtime (single, non-special, void-returning; parameter-carrying ones must take a reference type) and patches only what resolves; if nothing resolves it dumps the method list again so the next build can re-pin. Field report v1.0.4: this build resolves exactly `Unit.Awake`, `Unit.OnEnable`, `Unit.OnStartServer` (the three lifecycle callbacks — the spawn-data candidates are overloaded/non-void and are skipped); that is sufficient since all three run once per spawned unit, and the log line now also names which candidates were skipped. |
+ | `ModLog.cs`, `PatchTarget.cs` | Trimmed copies of Centurion's logging + patch-installation helpers. |
+@@ -53,12 +53,13 @@ Add any renamed field to the matching candidate array in `LadsClone.cs` and rebu
+ 
+ If the game loads with the plugin but the unit doesn't show in the encyclopedia or in the
+ [PlayableVehicles](https://github.com/BruhMov/NO-PlayableVec-personal-mods) ground-vehicle shop (AAA tab), check
+-`BepInEx\LogOutput.log` for these v1.0.5 lines:
++`BepInEx\LogOutput.log` for these v1.0.5+v1.0.6 lines:
+ 
+ | Log line | Meaning | Fix |
+ |---|---|---|
+ | `registered 'MSV LADS 200' ...` | registration ran at all | if missing, look at the next two rows |
+-| `source 'MSV_LADS' not found ... keys containing 'LADS': X, Y` | the stock unit's real encyclopedia key differs | set `SourceKeyOverride = X` in `razor.lads200.cfg` |
++| `source 'MSV_LADS' not found ... keys containing 'LADS': X, Y` (with repeating `still waiting:` lines) | the stock unit's real encyclopedia key differs | set `SourceKeyOverride = X` in `razor.lads200.cfg` |
++| `feature off: ArgumentException: Element provided cannot be assigned...` (v1.0.5) | typed catalog lists rejected the plain clone | fixed in v1.0.6 (typed clone + per-list skip) |
+ | `feature off: MissingFieldException: none of [unitPrefab, prefab]` | definition shape moved | decompile with ilspycmd, extend `PrefabNames` |
+ | `menu-check: clone prefab '...' GroundVehicle=NO` | PlayableVehicles filters out definitions whose prefab lacks `GroundVehicle` | report + check the source clone path |
+ | `menu-check: clone present in 0 Encyclopedia list(s)` | the catalog lists aren't IList-visible fields | report; interim fix: Blueprinter-style asset instead |
+diff --git a/src/Lads200/Lads200.csproj b/src/Lads200/Lads200.csproj
+index 5e4edb5..27a3221 100644
+--- a/src/Lads200/Lads200.csproj
++++ b/src/Lads200/Lads200.csproj
+@@ -4,7 +4,7 @@
+     <TargetFramework>netstandard2.1</TargetFramework>
+     <AssemblyName>Lads200</AssemblyName>
+     <RootNamespace>Lads200</RootNamespace>
+-    <Version>1.0.5</Version>
++    <Version>1.0.6</Version>
+     <LangVersion>latest</LangVersion>
+     <Nullable>annotations</Nullable> <!-- silences CS8632: the ?-annotations in PatchTarget are intentional -->
+     <Deterministic>true</Deterministic>
+diff --git a/src/Lads200/Lads200Plugin.cs b/src/Lads200/Lads200Plugin.cs
+index d4f22c3..447dd4f 100644
+--- a/src/Lads200/Lads200Plugin.cs
++++ b/src/Lads200/Lads200Plugin.cs
+@@ -19,7 +19,7 @@ namespace Lads200;
+ public sealed class Lads200Plugin : BaseUnityPlugin
+ {
+     public const string Guid = "razor.lads200";
+-    public const string Version = "1.0.5";
++    public const string Version = "1.0.6";
+ 
+     internal static ModLog Log { get; private set; }
+     internal static bool FeatureOff;
+diff --git a/src/Lads200/LadsClone.cs b/src/Lads200/LadsClone.cs
+index db7ad7a..fc42482 100644
+--- a/src/Lads200/LadsClone.cs
++++ b/src/Lads200/LadsClone.cs
+@@ -51,6 +51,43 @@ static class LadsClone
+     static UnitDefinition cloneDef;      // our cloned definition (destroyed again on rollback)
+     static bool registered;
+ 
++    /// <summary>
++    /// v1.0.6: a mod unit is only ever *cloned* from a stock UnitDefinition - nothing in this game spawns one directly.
++    /// The encyclopedia lists are typed (List&lt;VehicleDefinition&gt;, List&lt;AircraftDefinition&gt;, ...) and Object.Instantiate
++    /// of a ScriptableObject asset makes a plain UnitDefinition, which an IList.Add would reject with ArgumentException -
++    /// that exception used to hit Tick's catch and stand the whole feature down before anything was logged. So we walk the
++    /// source's class chain until Instantiate returns something assignable to the list element type (Unity clones at the
++    /// concrete type where the serialized data actually lives), and fall back to MemberwiseClone for exotic hierarchies.
++    /// </summary>
++    static UnitDefinition CloneDefinition(UnitDefinition source)
++    {
++        for (Type t = source.GetType(); t != null && typeof(UnitDefinition).IsAssignableFrom(t) && t != typeof(object); t = t.BaseType)
++        {
++            if (t.IsAbstract || t.IsInterface) continue;
++            try
++            {
++                UnityEngine.Object proto = UnityEngine.Object.Instantiate(source, null, false);
++                proto.name = NewKey;
++                if (proto is UnitDefinition ud && t.IsInstanceOfType(ud)) return ud;
++                UnityEngine.Object.Destroy(proto); // wrong runtime type: retry against the next class in the chain
++            }
++            catch { /* keep walking */ }
++        }
++
++        try
++        {
++            object shallow = source.MemberwiseClone(); // not a Unity "Object" clone: fine as an in-memory catalog row
++            ((UnitDefinition)shallow).name = NewKey;
++            return (UnitDefinition)shallow;
++        }
++        catch
++        {
++            UnitDefinition last = UnityEngine.Object.Instantiate(source); // let the caller's catch report it
++            last.name = NewKey;
++            return last;
++        }
++    }
++
+     /// <summary>True once the clone is in Encyclopedia.Lookup under <see cref="NewKey"/>.</summary>
+     public static bool IsRegistered => registered;
+ 
+@@ -85,8 +122,8 @@ static class LadsClone
+ 
+             // Clone the definition by hand: every instance field of the concrete type and each base up to ScriptableObject,
+             // including the private backing fields Unity serializes (jsonKey, unitName, emptyCost, prefab, ...).
+-            UnitDefinition def = UnityEngine.Object.Instantiate(source);
+-            def.name = NewKey;
++            // v1.0.6: typed clone (see CloneDefinition) so it can join the game's List<VehicleDefinition> catalog.
++            UnitDefinition def = CloneDefinition(source);
+ 
+             // Restamp identity + price on the cloned definition...
+             SetFirstFound(def.GetType(), def, KeyNames, NewKey);
+@@ -364,11 +401,32 @@ static class LadsClone
+ 
+     static void AddToTypedList(UnitDefinition source, UnitDefinition def)
+     {
+-        foreach (IList list in ListsContaining(source))
++        ModLog log = Log;
++        int joined = 0;
++        // v1.0.6: join by *key* as well as by reference. The shop catalog (Encyclopedia.i.vehicles) and the lookup can be
++        // filled from different sources in some builds, so "the source is in this list" alone was not enough to guarantee
++        // we land next to it. Any definition-typed list whose entries carry our source's jsonKey gets our clone too.
++        string sourceKey = GetStringField(source.GetType(), "jsonKey", source);
++        foreach (IList list in ListsForSource(source, sourceKey))
+         {
+-            if (!list.Contains(def)) list.Add(def);
++            if (!list.Contains(def))
++            {
++                try
++                {
++                    list.Add(def);
++                    joined++;
++                }
++                catch (Exception e)
++                {
++                    // Typed List<VehicleDefinition> rejecting a plain UnitDefinition must never kill the feature: skip the
++                    // list, say so once, keep the rest of the registration.
++                    log.StageOnce($"add-reject-{ShortListName(list)}", $"could not add the clone to {ShortListName(list)} ({e.GetType().Name}); that menu will not show it");
++                }
++            }
++            else joined++;
+         }
+ 
++        log.StageOnce("lists-joined", $"clone joined {joined} Encyclopedia list(s)");
+         AddMetadataRows(source, def);
+     }
+ 
+@@ -542,6 +600,54 @@ static class LadsClone
+         }
+     }
+ 
++    /// <summary>
++    /// v1.0.6: every definition-typed Encyclopedia list that is a "home" for the source: it either contains the source by
++    /// reference, or its entries carry the source's jsonKey (covers builds where the catalog and the lookup are filled from
++    /// different passes). Non-definition lists (UnitType rows etc.) are handled by AddMetadataRows instead.
++    /// </summary>
++    static IEnumerable<IList> ListsForSource(UnitDefinition source, string sourceKey)
++    {
++        var seen = new HashSet<IList>(ReferenceComparer.Instance);
++        foreach (IList list in AllEncyclopediaLists())
++        {
++            if (!IsDefinitionList(list) || !seen.Add(list)) continue;
++            bool home = false;
++            foreach (object item in list)
++            {
++                if (item == null) continue;
++                if (ReferenceEquals(item, source)) { home = true; break; }
++                if (!string.IsNullOrEmpty(sourceKey) && item.GetType().Name.EndsWith("Definition", StringComparison.Ordinal)
++                    && string.Equals(GetStringField(item.GetType(), "jsonKey", item), sourceKey, StringComparison.Ordinal))
++                {
++                    home = true;
++                    break;
++                }
++            }
++
++            if (home) yield return list;
++        }
++    }
++
++    /// <summary>A list whose element type derives from UnitDefinition (checked by name: no compile-time game types here).</summary>
++    static bool IsDefinitionList(IList list)
++    {
++        Type itemType = null;
++        foreach (Type g in list.GetType().GetInterfaces())
++        {
++            if (g.IsGenericType && g.GetGenericTypeDefinition() == typeof(IList<>)) { itemType = g.GetGenericArguments()[0]; break; }
++        }
++
++        if (itemType == null) itemType = list.GetType(); // non-generic lists: fall back to element inspection below
++        return itemType.Name.EndsWith("Definition", StringComparison.Ordinal) || itemType == typeof(UnitDefinition);
++    }
++
++    sealed class ReferenceComparer : IEqualityComparer<IList>
++    {
++        public static readonly ReferenceComparer Instance = new ReferenceComparer();
++        public bool Equals(IList a, IList b) => ReferenceEquals(a, b);
++        public int GetHashCode(IList l) => System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(l);
++    }
++
+     static IEnumerable<IList> TypedLists()
+     {
+         Type encType = AccessTools.TypeByName("Encyclopedia");
+diff --git a/src/Lads200/SpawnGuard.cs b/src/Lads200/SpawnGuard.cs
+index d2a9675..35b5560 100644
+--- a/src/Lads200/SpawnGuard.cs
++++ b/src/Lads200/SpawnGuard.cs
+@@ -27,6 +27,8 @@ static class SpawnGuard
+     internal static readonly List<PatchTarget> PatchTargets = new();
+ 
+     static float firstAttemptAt = float.NaN, lastRetryAt = float.NegativeInfinity;
++    const float StatusIntervalS = 10f;   // v1.0.6: "still waiting" heartbeat so a never-registering clone is visible in the log
++    static float lastStatusAt = float.NegativeInfinity;
+ 
+     /// <summary>Called from Lads200Plugin.Update every frame; retries at most twice a second (CenturionLog's rate-limit idea).</summary>
+     internal static void Tick()
+@@ -46,11 +48,22 @@ static class SpawnGuard
+ 
+         try
+         {
+-            LadsClone.TryRegister();
++            if (!LadsClone.TryRegister())
++            {
++                // v1.0.6: the silent failure mode - the retry loop kept returning false (source never found) and only ever
++                // logged "feature off" at the 120 s give-up. Now every 10 s until it succeeds or gives up.
++                long elapsed = (long)(now - firstAttemptAt);
++                if (now - lastStatusAt > StatusIntervalS)
++                {
++                    lastStatusAt = now;
++                    Lads200Plugin.Log.Warning($"still waiting: stock MSV LADS not in Encyclopedia.Lookup yet ({elapsed} s of {GiveUpS:F0})");
++                }
++            }
+         }
+         catch (Exception e)
+         {
+             // A member moved in a game update: do not spam retries, stand down with a clear line (PatchTarget.cs style).
++            // v1.0.6: include the exception type name - before, this line was the ONLY trace an aborted registration left.
+             Lads200Plugin.DisableFeature($"{e.GetType().Name}: {e.Message}");
+         }
+     }
+-- 
+2.39.5
+
