@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using HarmonyLib;
 using UnityEngine;
 
@@ -17,15 +18,12 @@ static class SpawnGuard
     const float RetryIntervalS = 0.5f;   // definitions land over several seconds after the menu loads (StartupHold.cs)
     const float GiveUpS = 120f;          // past this, stop retrying and stand the feature down (Centurion's MaxHoldS pattern)
 
-    internal static readonly PatchTarget[] PatchTargets =
-    {
-        // Unit.InstantiateSpawn(GameObject prefab, ...) is the single choke point every unit type passes through on every
-        // peer (Mirage spawns instantiate their prefab here). The parameter list is left null so AccessTools matches by
-        // name; if a game update removes the method entirely, InstallAll logs "missing: feature off" and local spawning
-        // still works - only remote-peer spawn requests could then race registration.
-        new("spawn-guard", typeof(Unit), "InstantiateSpawn",
-            postfix: AccessTools.Method(typeof(SpawnGuard), nameof(AfterInstantiateSpawn))),
-    };
+    /// <summary>
+    /// Populated at plugin Awake by <see cref="SpawnProbe.Discover"/>: one entry per spawn/instantiate hook the game build
+    /// actually declares on Unit (the first release hardcoded Unit.InstantiateSpawn and hit MissingMethodException - the
+    /// probe finds the real name(s) at runtime instead of guessing them from a decompile).
+    /// </summary>
+    internal static readonly List<PatchTarget> PatchTargets = new();
 
     static float firstAttemptAt = float.NaN, lastRetryAt = float.NegativeInfinity;
 
@@ -56,12 +54,18 @@ static class SpawnGuard
         }
     }
 
-    static void AfterInstantiateSpawn(ref GameObject __result)
+    /// <summary>
+    /// Postfix on every spawn hook SpawnProbe found. Runs after the game instantiated/started a Unit; if that unit's prefab
+    /// is ours (or named like our key) and registration has not finished yet, finish it right now so the encyclopedia entry
+    /// exists before anything else can ask for it. Idempotent: once registered, this is a single cheap boolean test.
+    /// </summary>
+    static void AfterUnitSpawn(Unit __instance)
     {
-        if (__result == null || Lads200Plugin.FeatureOff) return;
-        if (!__result.name.StartsWith(LadsClone.NewKey, StringComparison.Ordinal)
-            && !__result.name.StartsWith("MSV_LADS_200", StringComparison.Ordinal)) return;
-        if (LadsClone.IsRegistered) return;
+        if (__instance == null || Lads200Plugin.FeatureOff || LadsClone.IsRegistered) return;
+
+        string goName = __instance.gameObject != null ? __instance.gameObject.name : null;
+        string defKey = GetDefinitionKey(__instance);
+        if (!IsOurs(goName) && !IsOurs(defKey)) return;
 
         // A spawn of our prefab beat registration (only possible before the encyclopedia filled in): finish now, on the spot.
         try
@@ -70,10 +74,35 @@ static class SpawnGuard
             {
                 Lads200Plugin.Log.Info("spawn-guard: registered during a spawn request");
             }
+            else
+            {
+                Lads200Plugin.Log.Warning("spawn-guard: our unit spawned before the stock MSV LADS was in the encyclopedia; retrying from Update");
+            }
         }
         catch (Exception e)
         {
             Lads200Plugin.DisableFeature($"spawn-time registration failed: {e.GetType().Name}: {e.Message}");
+        }
+    }
+
+    static bool IsOurs(string s)
+        => s != null && (s.StartsWith(LadsClone.NewKey, StringComparison.Ordinal)
+                         || s.StartsWith("MSV_LADS_200", StringComparison.Ordinal));
+
+    /// <summary>unit.definition.jsonKey via reflection-free access where possible; definition may be null very early.</summary>
+    static string GetDefinitionKey(Unit unit)
+    {
+        try
+        {
+            var defProp = AccessTools.Property(unit.GetType(), "definition") ?? AccessTools.Property(typeof(Unit), "definition");
+            object def = defProp?.GetGetMethod()?.Invoke(unit, null);
+            if (def == null) return null;
+            var jsonKey = AccessTools.Field(def.GetType(), "jsonKey") ?? AccessTools.Field(typeof(UnitDefinition), "jsonKey");
+            return jsonKey?.GetValue(def) as string;
+        }
+        catch
+        {
+            return null; // best-effort only; the gameObject-name check above still covers the common case
         }
     }
 }

@@ -6,14 +6,15 @@ using HarmonyLib;
 namespace Lads200;
 
 /// <summary>
-/// One Harmony patch the mod wants, named by the feature it serves. The game method is looked up by name, so a game
-/// update that renames or removes it switches that feature off instead of failing the plugin (skill patching.md).
+/// One Harmony patch the mod wants. The feature name is the declaring type + method, so every target for one game method
+/// shares its on/off state (Centurion repo's PatchTarget.cs). The game method is looked up by name AND parameter list
+/// (inherited methods included), so a game update that renames or re-signatures it switches that target off instead of
+/// failing the plugin.
 /// </summary>
 public sealed class PatchTarget
 {
-    public PatchTarget(string feature, Type type, string method, Type[]? parameters = null, MethodInfo? prefix = null, MethodInfo? postfix = null, MethodInfo? transpiler = null)
+    public PatchTarget(Type type, string method, ParameterInfo[]? parameters = null, MethodInfo? prefix = null, MethodInfo? postfix = null, MethodInfo? transpiler = null)
     {
-        Feature = feature;
         Type = type;
         Method = method;
         Parameters = parameters;
@@ -22,13 +23,15 @@ public sealed class PatchTarget
         Transpiler = transpiler;
     }
 
-    public string Feature { get; }
     public Type Type { get; }
     public string Method { get; }
-    public Type[]? Parameters { get; }
+    public ParameterInfo[]? Parameters { get; }
     public MethodInfo? Prefix { get; }
     public MethodInfo? Postfix { get; }
     public MethodInfo? Transpiler { get; }
+
+    /// <summary>Feature key: "Unit.InstantiateSpawn"-style, derived from the target itself.</summary>
+    public string Feature => Type.Name + "." + Method;
 
     string Name => Type.Name + "." + Method;
 
@@ -46,7 +49,9 @@ public sealed class PatchTarget
             if (off.Contains(target.Feature)) continue;
             try
             {
-                MethodInfo? original = AccessTools.DeclaredMethod(target.Type, target.Method, target.Parameters);
+                Type[]? types = target.Parameters == null ? null : Array.ConvertAll(target.Parameters, p => p.ParameterType);
+                // AccessTools.Method walks base classes too - the 1.0.0 failure came from DeclaredMethod only seeing Unit itself.
+                MethodInfo? original = AccessTools.Method(target.Type, target.Method, types);
                 if (original == null) throw new MissingMethodException(target.Type.FullName, target.Method);
                 installed.Add((target, original));
                 harmony.Patch(
@@ -54,7 +59,7 @@ public sealed class PatchTarget
                     target.Prefix == null ? null : new HarmonyMethod(target.Prefix),
                     target.Postfix == null ? null : new HarmonyMethod(target.Postfix),
                     target.Transpiler == null ? null : new HarmonyMethod(target.Transpiler));
-                log.Info($"patch {target.Feature}: {target.Name} found/patched");
+                log.Info($"patch {target.Feature}: found/patched");
             }
             catch (Exception e)
             {

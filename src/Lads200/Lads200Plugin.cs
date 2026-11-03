@@ -1,5 +1,5 @@
 using System;
-using System.Linq;
+
 using BepInEx;
 using BepInEx.Configuration;
 using HarmonyLib;
@@ -19,7 +19,7 @@ namespace Lads200;
 public sealed class Lads200Plugin : BaseUnityPlugin
 {
     public const string Guid = "razor.lads200";
-    public const string Version = "1.0.0";
+    public const string Version = "1.0.1";
 
     internal static ModLog Log;
     internal static bool FeatureOff;
@@ -48,10 +48,14 @@ public sealed class Lads200Plugin : BaseUnityPlugin
         }
 
         harmony = new Harmony(Guid);
-        var off = PatchTarget.InstallAll(harmony, SpawnGuard.PatchTargets.ToList(), Log);
-        if (off.Contains("spawn-guard"))
+        // Discover the game build's real spawn hook(s) on Unit before building the patch table (1.0.0 hardcoded
+        // Unit.InstantiateSpawn and hit MissingMethodException; the probe finds whatever name this build declares).
+        SpawnProbe.Discover(SpawnGuard.PatchTargets, Log);
+        var off = PatchTarget.InstallAll(harmony, SpawnGuard.PatchTargets, Log);
+        if (off.Count > 0)
         {
-            Log.Warning("spawn-guard patch target missing: remote-peer spawn safety off; the unit still registers locally");
+            Log.Warning("spawn-guard: no usable spawn hook was patched in this game build; remote-peer spawn safety off - " +
+                        "the unit still registers locally from the Update retry loop");
         }
 
         Log.Info(Invariant($"MSV LADS 200 {Version} ({Guid}); Enabled={enabled.Value} Cost=${LadsClone.Cost:N0} Laser={LadsClone.LaserPowerKw:F0} kW blue"));
