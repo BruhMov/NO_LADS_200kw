@@ -1,6 +1,6 @@
 using System;
 using System.Collections.Generic;
-using HarmonyLib;
+using System.Reflection;
 using UnityEngine;
 
 namespace Lads200;
@@ -59,11 +59,14 @@ static class SpawnGuard
     /// is ours (or named like our key) and registration has not finished yet, finish it right now so the encyclopedia entry
     /// exists before anything else can ask for it. Idempotent: once registered, this is a single cheap boolean test.
     /// </summary>
-    static void AfterUnitSpawn(Unit __instance)
+    // public: SpawnProbe takes its MethodInfo with AccessTools.Method(typeof(SpawnGuard), nameof(AfterUnitSpawn)).
+    internal static void AfterUnitSpawn(object __instance)
     {
+        // Parameter typed as `object` on purpose: Mirage (NetworkBehaviour, the base of Unit) lives in Managed\Mirage.dll
+        // which we deliberately do not reference - a strongly-typed postfix would force every user to add that dll.
         if (__instance == null || Lads200Plugin.FeatureOff || LadsClone.IsRegistered) return;
 
-        string goName = __instance.gameObject != null ? __instance.gameObject.name : null;
+        string goName = GetGameObjectName(__instance);
         string defKey = GetDefinitionKey(__instance);
         if (!IsOurs(goName) && !IsOurs(defKey)) return;
 
@@ -89,20 +92,61 @@ static class SpawnGuard
         => s != null && (s.StartsWith(LadsClone.NewKey, StringComparison.Ordinal)
                          || s.StartsWith("MSV_LADS_200", StringComparison.Ordinal));
 
-    /// <summary>unit.definition.jsonKey via reflection-free access where possible; definition may be null very early.</summary>
-    static string GetDefinitionKey(Unit unit)
+    /// <summary>
+    /// ((Component)__instance).gameObject.name - reached by reflection so the Mirage assembly (which defines the
+    /// NetworkBehaviour base class Unity's Component lookup passes through) never needs referencing at compile time.
+    /// </summary>
+    static string GetGameObjectName(object unit)
     {
         try
         {
-            var defProp = AccessTools.Property(unit.GetType(), "definition") ?? AccessTools.Property(typeof(Unit), "definition");
-            object def = defProp?.GetGetMethod()?.Invoke(unit, null);
-            if (def == null) return null;
-            var jsonKey = AccessTools.Field(def.GetType(), "jsonKey") ?? AccessTools.Field(typeof(UnitDefinition), "jsonKey");
-            return jsonKey?.GetValue(def) as string;
+            const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+            object go = null;
+            PropertyInfo p = unit.GetType().GetProperty("gameObject", flags);
+            if (p != null)
+            {
+                go = p.GetValue(unit, null); // UnityEngine.Object's op_Equality is unavailable here; catch destroyed refs instead
+            }
+            else
+            {
+                FieldInfo f = unit.GetType().GetField("gameObject", flags); // some builds name the field this way
+                go = f?.GetValue(unit);
+            }
+
+            if (go == null) return null;
+            return go.GetType().GetProperty("name")?.GetValue(go, null) as string;
         }
         catch
         {
-            return null; // best-effort only; the gameObject-name check above still covers the common case
+            return null; // destroyed object / missing member; the definition-key check below still covers it
+        }
+    }
+
+    /// <summary>unit.definition.jsonKey via plain reflection; definition may be null very early.</summary>
+    static string GetDefinitionKey(object unit)
+    {
+        try
+        {
+            const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+            object def = null;
+            PropertyInfo defProp = unit.GetType().GetProperty("definition", flags);
+            if (defProp != null)
+            {
+                def = defProp.GetValue(unit, null);
+            }
+            else
+            {
+                def = unit.GetType().GetField("definition", flags)?.GetValue(unit);
+            }
+
+            if (def == null) return null;
+            if (def.GetType().GetField("jsonKey", flags) is FieldInfo f) return f.GetValue(def) as string;
+            if (def.GetType().GetProperty("jsonKey", flags)?.GetGetMethod() is MethodInfo g) return g.Invoke(def, null) as string;
+            return null;
+        }
+        catch
+        {
+            return null; // best-effort only
         }
     }
 }

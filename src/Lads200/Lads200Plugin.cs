@@ -19,19 +19,20 @@ namespace Lads200;
 public sealed class Lads200Plugin : BaseUnityPlugin
 {
     public const string Guid = "razor.lads200";
-    public const string Version = "1.0.1";
+    public const string Version = "1.0.2";
 
     internal static ModLog Log;
     internal static bool FeatureOff;
 
-    ConfigEntry<bool> enabled;
+    ConfigEntry<bool> modEnabled; // not "enabled": that name hides MonoBehaviour.enabled (CS0108)
     Harmony harmony;
 
     void Awake()
     {
         Log = new ModLog(Logger);
+        LadsClone.Log = Log; // static wiring (CS0649): without this every registration log line would hit a null logger
 
-        enabled = Config.Bind("General", "Enabled", true, "Adds the 'MSV LADS 200' ground unit (a clone of the stock MSV LADS)");
+        modEnabled = Config.Bind("General", "Enabled", true, "Adds the 'MSV LADS 200' ground unit (a clone of the stock MSV LADS)");
         LadsClone.NewUnitName = Config.Bind("General", "UnitName", "MSV LADS 200",
             "Display name of the cloned unit in build/encyclopedia menus").Value;
         LadsClone.NewKey = Config.Bind("General", "UnitKey", "MSV_LADS_200",
@@ -58,12 +59,12 @@ public sealed class Lads200Plugin : BaseUnityPlugin
                         "the unit still registers locally from the Update retry loop");
         }
 
-        Log.Info(Invariant($"MSV LADS 200 {Version} ({Guid}); Enabled={enabled.Value} Cost=${LadsClone.Cost:N0} Laser={LadsClone.LaserPowerKw:F0} kW blue"));
+        Log.Info(Invariant($"MSV LADS 200 {Version} ({Guid}); Enabled={modEnabled.Value} Cost=${LadsClone.Cost:N0} Laser={LadsClone.LaserPowerKw:F0} kW blue"));
     }
 
     void Update()
     {
-        if (FeatureOff || !enabled.Value)
+        if (FeatureOff || !modEnabled.Value)
         {
             if (LadsClone.IsRegistered) LadsClone.Disable();
             return;
