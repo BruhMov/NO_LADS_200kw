@@ -19,9 +19,9 @@ namespace Lads200;
 public sealed class Lads200Plugin : BaseUnityPlugin
 {
     public const string Guid = "razor.lads200";
-    public const string Version = "1.0.4";
+    public const string Version = "1.0.5";
 
-    internal static ModLog Log;
+    internal static ModLog Log { get; private set; }
     internal static bool FeatureOff;
 
     ConfigEntry<bool> modEnabled; // not "enabled": that name hides MonoBehaviour.enabled (CS0108)
@@ -39,6 +39,9 @@ public sealed class Lads200Plugin : BaseUnityPlugin
             "Encyclopedia json key of the cloned unit; must differ from any stock or other mod key").Value;
         LadsClone.Cost = Config.Bind("General", "CostDollars", 10_000_000f,
             "Purchase price of the unit, in dollars").Value;
+        var sourceKeyOverride = Config.Bind("General", "SourceKeyOverride", "",
+            "Encyclopedia key of the stock MSV LADS to clone; leave empty for the built-in 'MSV_LADS' (tolerant match)").Value;
+        if (!string.IsNullOrWhiteSpace(sourceKeyOverride)) LadsClone.SourceKey = sourceKeyOverride.Trim();
         LadsClone.LaserPowerKw = Config.Bind("Laser", "PowerKw", 200f,
             "The clone's laser power in kW (the stock MSV LADS fires 80 kW)").Value;
 

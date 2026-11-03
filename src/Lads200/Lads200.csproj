@@ -4,7 +4,7 @@
     <TargetFramework>netstandard2.1</TargetFramework>
     <AssemblyName>Lads200</AssemblyName>
     <RootNamespace>Lads200</RootNamespace>
-    <Version>1.0.4</Version>
+    <Version>1.0.5</Version>
     <LangVersion>latest</LangVersion>
     <Nullable>annotations</Nullable> <!-- silences CS8632: the ?-annotations in PatchTarget are intentional -->
     <Deterministic>true</Deterministic>
