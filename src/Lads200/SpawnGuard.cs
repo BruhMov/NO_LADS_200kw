@@ -71,7 +71,23 @@ static class SpawnGuard
         string defKey = GetDefinitionKey(__instance);
         if (!IsOurs(goName) && !IsOurs(defKey)) return;
 
-        // A spawn (or Awake/OnEnable of our prefab's Unit) beat registration (only possible before the encyclopedia
+        // v1.0.5: the patched hooks are lifecycle callbacks (Awake/OnEnable/OnStartServer), which also fire for an
+        // unspawned instance of the stock LADS prefab sitting in the encyclopedia-preview / object-pool scene - its GO
+        // name matches ours before any definition is attached. Registering from that would let TryRegister's unitName
+        // fallback stamp jsonKey/unitName onto the SHARED stock definition ("the stock MSV LADS turned into the 200").
+        // Only a Unit that already carries a definition key may register here; the legitimate early-spawn race (a real
+        // networked spawn beating the Update retry) still has defKey by then, and everything else waits for the retry loop.
+        if (defKey == null)
+        {
+            if (goName != null && goName.IndexOf("200", StringComparison.Ordinal) >= 0)
+            {
+                Lads200Plugin.Log.StageOnce("guard-unspawned", "spawn-guard: our prefab instantiated without a definition (menu preview/pool); ignoring, waiting for the Update retry");
+            }
+
+            return;
+        }
+
+        // A spawn (or Awake/OnEnable of our spawned Unit) beat registration (only possible before the encyclopedia
         // filled in): finish now, on the spot.
         try
         {

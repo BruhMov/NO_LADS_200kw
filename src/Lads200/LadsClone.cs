@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections;
 using System.Reflection;
+using System.Text;
 using HarmonyLib;
 using UnityEngine;
 
@@ -17,8 +18,9 @@ namespace Lads200;
 /// </summary>
 static class LadsClone
 {
-    /// <summary>The source unit's encyclopedia key / display name as shipped by the game.</summary>
-    public const string SourceKey = "MSV_LADS";
+    /// <summary>The source unit's encyclopedia key / display name as shipped by the game. SourceKey is overridable via
+    /// config (SourceKeyOverride) for builds whose stock key differs from our guess; FindSource also matches tolerantly.</summary>
+    public static string SourceKey = "MSV_LADS";
     public const string SourceUnitName = "MSV LADS";
 
     /// <summary>Configurable through BepInEx/config/razor.lads200.cfg (Lads200Plugin).</summary>
@@ -32,12 +34,15 @@ static class LadsClone
 
     // Field names verified against the Centurion repo: WeaponMount.emptyCost (CenturionAuthor.Cram.cs),
     // Laser.power (same file), Encyclopedia.Lookup / UnitDefinition.jsonKey / .unitName (MissionGeometryLog.cs, StartupHold.cs).
-    static readonly string[] CostNames = { "emptyCost", "cost" };
+    // "value": the price the PlayableVehicles shop actually charges (VehicleShop.Price() returns definition.value + ammo value;
+    // a cloned stock LADS would otherwise keep the cheap original price there even after emptyCost was restamped).
+    static readonly string[] CostNames = { "emptyCost", "cost", "value" };
     static readonly string[] NameNames = { "unitName", "displayName", "name" };
     static readonly string[] KeyNames = { "jsonKey" };
     static readonly string[] PowerNames = { "power", "powerKW", "powerKw" };
     static readonly string[] MaxPowerNames = { "maxPower", "maximumPower" };
     static readonly string[] BeamColorNames = { "beamColor", "laserColor", "color" };
+    static readonly string[] PrefabNames = { "unitPrefab", "prefab" };
 
     /// <summary>Set by the plugin in Awake; every line this class writes goes through it.</summary>
     internal static ModLog Log;
@@ -70,10 +75,12 @@ static class LadsClone
             UnitDefinition source = FindSource(lookup);
             if (source == null) return false; // stock units not in yet: retry
 
-            GameObject sourcePrefab = GetGameObjectField(source.GetType(), "prefab", source);
+            // v1.0.5: this build names the definition's spawned prefab `unitPrefab` (verified against the PlayableVehicles
+            // repo: VehicleShop.TryGet -> definition.unitPrefab.GetComponent<GroundVehicle>()); keep trying `prefab`.
+            GameObject sourcePrefab = GetGameObjectFieldAny(source.GetType(), source, PrefabNames);
             if (sourcePrefab == null)
             {
-                throw new MissingFieldException(source.GetType().FullName, "prefab (GameObject)");
+                throw new MissingFieldException(source.GetType().FullName, $"none of [{string.Join(", ", PrefabNames)}] (GameObject)");
             }
 
             // Clone the definition by hand: every instance field of the concrete type and each base up to ScriptableObject,
@@ -84,7 +91,9 @@ static class LadsClone
             // Restamp identity + price on the cloned definition...
             SetFirstFound(def.GetType(), def, KeyNames, NewKey);
             SetFirstFound(def.GetType(), def, NameNames, NewUnitName);
-            SetNumericChain(def, CostNames, Cost, "definition cost");
+            // v1.0.5: set every cost member that exists (emptyCost AND value): the encyclopedia shows one, the
+            // PlayableVehicles shop charges the other (VehicleShop.Price = definition.value + ammo). First-found was wrong.
+            SetNumericsAll(def, CostNames, Cost, "definition cost");
 
             // ...then clone the prefab itself so the original MSV LADS keeps its 80 kW laser, and upgrade the clone's lasers.
             GameObject go = UnityEngine.Object.Instantiate(sourcePrefab);
@@ -101,7 +110,7 @@ static class LadsClone
                 throw;
             }
 
-            SetField(def.GetType(), def, "prefab", go);
+            SetFieldAny(def.GetType(), def, PrefabNames, go);
 
             // Register: the lookup plus whichever typed list mirrors it (aircraft/ships/vehicles/ground/buildings...).
             lookup.Add(NewKey, def);
@@ -110,7 +119,69 @@ static class LadsClone
             cloneDef = def;
             registered = true;
             log.Info($"registered '{NewUnitName}' (key {NewKey}) as a clone of '{SourceUnitName}': cost ${Cost:N0}, laser {LaserPowerKw:F0} kW blue");
+            DiagnoseMenus(log, source, def);
             return true;
+        }
+    }
+
+    /// <summary>
+    /// One-shot post-registration check against the two consumers users actually look at: the encyclopedia lookup and the
+    /// PlayableVehicles ground-vehicle shop (github.com/BruhMov/NO-PlayableVec-personal-mods). That shop builds its catalog
+    /// from Encyclopedia.i.vehicles and silently drops any definition whose unitPrefab lacks a GroundVehicle component
+    /// (VehicleShop.TryGet), so these lines say exactly which of the three failure modes applies if the unit still doesn't show.
+    /// </summary>
+    static void DiagnoseMenus(ModLog log, UnitDefinition source, UnitDefinition def)
+    {
+        try
+        {
+            // 1) Which prefab field does this build use, and does our cloned prefab carry a GroundVehicle?
+            GameObject srcPfb = GetGameObjectFieldAny(source.GetType(), source, PrefabNames);
+            GameObject ourPfb = GetGameObjectFieldAny(def.GetType(), def, PrefabNames);
+            bool hasGroundVehicle = false;
+            string pfbInfo;
+            if (ourPfb == null)
+            {
+                pfbInfo = "clone prefab field 'prefab'/'unitPrefab' is EMPTY";
+            }
+            else
+            {
+                foreach (Component c in ourPfb.GetComponentsInChildren<Component>(true))
+                {
+                    if (c != null && c.GetType().Name == "GroundVehicle") { hasGroundVehicle = true; break; }
+                }
+
+                pfbInfo = $"clone prefab '{ourPfb.name}' GroundVehicle={(hasGroundVehicle ? "yes" : "NO -> PlayableVehicles' shop will skip it (TryGet filter)")}";
+            }
+
+            log.Info($"menu-check: {pfbInfo}; source prefab '{srcPfb?.name ?? "(none)"}'");
+
+            // 2) Is the clone actually in the vehicle catalog the shop reads (Encyclopedia.i.vehicles)?
+            int inCatalogCount = 0, srcInCatalogCount = 0;
+            foreach (IList list in AllEncyclopediaLists())
+            {
+                bool ours = false, srcs = false;
+                foreach (object item in list)
+                {
+                    if (ReferenceEquals(item, def)) ours = true;
+                    else if (ReferenceEquals(item, source)) srcs = true;
+                }
+
+                if (ours) inCatalogCount++;
+                if (srcs) srcInCatalogCount++;
+            }
+
+            log.Info($"menu-check: clone present in {inCatalogCount} Encyclopedia list(s) (stock MSV LADS is in {srcInCatalogCount}); " +
+                     "if the stock LADS count is >0 but this one is 0, the definition lists are not IList-visible");
+
+            // 3) Did the game's own category metadata (vehicleTypes etc.) get a row for us?
+            if (!string.IsNullOrEmpty(GetStringValueOfAny(def, KeyNames2)))
+            {
+                log.Info("menu-check: encyclopedia key set to '" + NewKey + "'");
+            }
+        }
+        catch (Exception e)
+        {
+            log.Warning($"menu-check skipped: {e.GetType().Name}: {e.Message}");
         }
     }
 
@@ -144,7 +215,15 @@ static class LadsClone
 
     static UnitDefinition FindSource(IDictionary lookup)
     {
+        // v1.0.5: the exact key first, then a tolerant scan (case-insensitive, ignoring '_'/'-'). The stock key in this
+        // game build's encyclopedia json may be "MSV LADS" / "Msv_Lads" etc.; failing to find the source used to mean the
+        // feature silently gave up after 120 s with only a "feature off" line, which reads like "the unit never appears".
         if (lookup.Contains(SourceKey) && lookup[SourceKey] is UnitDefinition byKey) return byKey;
+
+        foreach (DictionaryEntry entry in lookup)
+        {
+            if (entry.Key is string k && KeyLike(k, SourceKey) && entry.Value is UnitDefinition defByKey) return defByKey;
+        }
 
         foreach (DictionaryEntry entry in lookup)
         {
@@ -156,7 +235,35 @@ static class LadsClone
             }
         }
 
+        // Nothing matched: list the candidate keys once per session so the config can be corrected instead of guessing -
+        // this is the diagnostic that distinguishes "mod never registered" from "registered but invisible in menus".
+        if (!sourceMissingLogged)
+        {
+            sourceMissingLogged = true;
+            var keys = new List<string>();
+            foreach (DictionaryEntry entry in lookup)
+            {
+                if (entry.Key is string ks && ks.IndexOf("LADS", StringComparison.OrdinalIgnoreCase) >= 0) keys.Add(ks);
+            }
+
+            Log.Warning($"source '{SourceKey}' not found in Encyclopedia.Lookup ({lookup.Count} entries); keys containing 'LADS': " +
+                        (keys.Count == 0 ? "(none)" : string.Join(", ", keys)) + " — if the stock MSV LADS uses another key, set it via SourceKeyOverride in razor.lads200.cfg");
+        }
+
         return null;
+    }
+
+    static bool sourceMissingLogged; // one listing per session, not every retry tick
+
+    /// <summary>"MSV_LADS" ~ "MSV LADS" ~ "msvlads": case/dash/underscore-insensitive key comparison.</summary>
+    static bool KeyLike(string a, string b) => string.Equals(Norm(a), Norm(b), StringComparison.OrdinalIgnoreCase);
+
+    static string Norm(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return s ?? string.Empty;
+        var sb = new StringBuilder(s.Length);
+        foreach (char c in s) if (c != '_' && c != '-' && c != ' ') sb.Append(c);
+        return sb.ToString();
     }
 
     // ---------------------------------------------------------------- lasers
@@ -243,6 +350,17 @@ static class LadsClone
     // ---------------------------------------------------------------- encyclopedia typed lists
     // Encyclopedia.i exposes List<UnitDefinition>-typed fields (aircraft etc., MissionGeometryLog.cs uses .aircraft);
     // the clone must join every list its source joins, or the spawn menu and the faction HQ never see it.
+    //
+    // Two extra kinds of list matter for in-game menus and were the reason a registered clone stayed invisible:
+    //   - "catalog" lists (Encyclopedia.vehicles / .groundVehicles): PlayableVehicles' vehicle shop builds its whole
+    //     catalog from Encyclopedia.i.vehicles (VehicleShop.Catalog) and silently drops entries whose unitPrefab has no
+    //     GroundVehicle component (TryGet). The stock MSV LADS is in that list, so joining every list our source is in
+    //     covers it - as long as those fields are IList-compatible, which they are (List<T>).
+    //   - metadata lists (Encyclopedia.vehicleTypes: List<UnitType>, i.e. {jsonKey?, typeName} category rows; the shop's
+    //     tab bar enumerates them by index against VehicleDefinition.vehicleType, e.g. AAA). These hold UnitType objects,
+    //     not UnitDefinitions, so reflection on IList-of-definitions misses them entirely. If the game resolves a unit's
+    //     encyclopedia row by jsonKey, the clone needs its own row or it renders with an empty name/category. Best-effort
+    //     below: add a cloned UnitType row wherever the source has one.
 
     static void AddToTypedList(UnitDefinition source, UnitDefinition def)
     {
@@ -250,6 +368,8 @@ static class LadsClone
         {
             if (!list.Contains(def)) list.Add(def);
         }
+
+        AddMetadataRows(source, def);
     }
 
     static void RemoveFromTypedLists(UnitDefinition def)
@@ -257,6 +377,160 @@ static class LadsClone
         foreach (IList list in TypedLists())
         {
             list.Remove(def);
+        }
+
+        RemoveMetadataRows(def);
+    }
+
+    /// <summary>
+    /// For every list on Encyclopedia that contains the source definition *or* a metadata row keyed by the source key
+    /// (vehicleTypes etc.), make sure a row keyed by NewKey exists too. Never throws: anything unexpected is skipped with
+    /// a StageOnce line so the primary registration still stands.
+    /// </summary>
+    static void AddMetadataRows(UnitDefinition source, UnitDefinition def)
+    {
+        ModLog log = Log;
+        string sourceKey = GetStringField(source.GetType(), "jsonKey", source);
+        foreach (IList list in AllEncyclopediaLists())
+        {
+            try
+            {
+                object template = null; // the source's own row in this list, if any
+                foreach (object item in list)
+                {
+                    if (item == null) continue;
+                    if (ReferenceEquals(item, source)) continue; // definition list, handled above
+                    if (RowMatches(item, sourceKey)) { template = item; break; }
+                }
+
+                if (template == null) continue;
+
+                bool exists = false;
+                foreach (object item in list)
+                {
+                    if (item != null && RowMatches(item, NewKey)) { exists = true; break; }
+                }
+
+                if (exists) continue;
+
+                object row = CloneRow(template);
+                if (row == null)
+                {
+                    log.StageOnce("meta-row-clone", $"could not clone {template.GetType().Name} row for '{NewKey}' (menu may show it under the stock category name)");
+                    continue;
+                }
+
+                SetRowKey(row, NewKey);
+                list.Add(row);
+                log.StageOnce($"meta-row-{ShortListName(list)}", $"added '{NewKey}' row to {ShortListName(list)} ({template.GetType().Name})");
+            }
+            catch (Exception e)
+            {
+                log.StageOnce("meta-row-error", $"metadata row copy skipped: {e.GetType().Name}: {e.Message}");
+            }
+        }
+    }
+
+    static void RemoveMetadataRows(UnitDefinition def)
+    {
+        foreach (IList list in AllEncyclopediaLists())
+        {
+            try
+            {
+                for (int i = list.Count - 1; i >= 0; i--)
+                {
+                    if (RowMatches(list[i], NewKey)) list.RemoveAt(i);
+                }
+            }
+            catch { /* rollback best-effort */ }
+        }
+    }
+
+    /// <summary>Every List-typed field on the Encyclopedia singleton (definition lists and UnitType category lists alike).</summary>
+    static IEnumerable<IList> AllEncyclopediaLists()
+    {
+        Type encType = AccessTools.TypeByName("Encyclopedia");
+        object enc = AccessTools.PropertyGetter(encType, "i")?.Invoke(null, null) ?? AccessTools.Field(encType, "i")?.GetValue(null);
+        if (enc == null) yield break;
+
+        foreach (FieldInfo f in enc.GetType().GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance))
+        {
+            if (typeof(IList).IsAssignableFrom(f.FieldType) && f.GetValue(enc) is IList list)
+            {
+                yield return list;
+            }
+        }
+    }
+
+    static string ShortListName(IList list) => list.GetType().Name;
+
+    /// <summary>True if <paramref name="row"/> is a metadata row whose key field equals <paramref name="key"/>.</summary>
+    static bool RowMatches(object row, string key)
+    {
+        if (row == null || string.IsNullOrEmpty(key)) return false;
+        // Definition lists are handled by reference, not by key. Checked by type NAME because UnitDefinition lives in the
+        // game's global namespace and this file deliberately has no `using` for it (same reason SpawnGuard reflects instead
+        // of referencing Mirage types).
+        if (row.GetType().Name == "UnitDefinition") return false;
+        string k = GetStringValueOfAny(row, KeyNames2);
+        return string.Equals(k, key, StringComparison.Ordinal);
+    }
+
+    static readonly string[] KeyNames2 = { "jsonKey", "key", "unitKey", "name" };
+
+    static string GetStringValueOfAny(object target, string[] candidates)
+    {
+        const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+        for (Type t = target.GetType(); t != null && t != typeof(object); t = t.BaseType)
+        {
+            foreach (string name in candidates)
+            {
+                FieldInfo f = t.GetField(name, flags | BindingFlags.DeclaredOnly);
+                if (f != null && f.FieldType == typeof(string)) return f.GetValue(target) as string;
+                PropertyInfo p = t.GetProperty(name, flags | BindingFlags.DeclaredOnly);
+                if (p != null && p.PropertyType == typeof(string) && p.CanRead && p.GetIndexParameters().Length == 0)
+                {
+                    try { return p.GetValue(target, null) as string; } catch { }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Shallow memberwise copy of a plain metadata row (struct or class), via Activator + field walk.</summary>
+    static object CloneRow(object template)
+    {
+        Type rt = template.GetType();
+        if (rt.IsValueType) return template; // boxed struct copy: mutating the box mutates nothing else
+        try
+        {
+            object copy = Activator.CreateInstance(rt, nonPublic: true);
+            const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+            foreach (FieldInfo f in rt.GetFields(flags))
+            {
+                if (f.IsInitOnly) continue;
+                f.SetValue(copy, f.GetValue(template));
+            }
+
+            return copy;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    static void SetRowKey(object row, string key)
+    {
+        const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly;
+        for (Type t = row.GetType(); t != null && t != typeof(object); t = t.BaseType)
+        {
+            foreach (string name in KeyNames2)
+            {
+                FieldInfo f = t.GetField(name, flags);
+                if (f != null && f.FieldType == typeof(string)) { f.SetValue(row, key); return; }
+            }
         }
     }
 
@@ -298,6 +572,29 @@ static class LadsClone
     static GameObject GetGameObjectField(Type type, string fieldName, object target)
         => GetFieldInternal<GameObject>(type, fieldName, target, required: false);
 
+    static GameObject GetGameObjectFieldAny(Type type, object target, string[] fieldNames)
+    {
+        foreach (string name in fieldNames)
+        {
+            GameObject go = GetGameObjectField(type, name, target);
+            if (go != null) return go;
+        }
+
+        return null;
+    }
+
+    /// <summary>Sets the first field in <paramref name="fieldNames"/> that exists and accepts the value.</summary>
+    static void SetFieldAny(Type type, object target, string[] fieldNames, object value)
+    {
+        foreach (string name in fieldNames)
+        {
+            try { SetField(type, target, name, value); return; }
+            catch (MissingFieldException) { continue; }
+        }
+
+        throw new MissingFieldException(type.FullName, $"none of [{string.Join(", ", fieldNames)}] (settable to {value.GetType().Name})");
+    }
+
     static string GetStringField(Type type, string fieldName, object target)
         => GetFieldInternal<string>(type, fieldName, target, required: false);
 
@@ -333,6 +630,18 @@ static class LadsClone
     {
         if (SetNumeric(target, candidates, value)) return;
         throw new MissingFieldException(target.GetType().FullName, $"none of [{string.Join(", ", candidates)}] for {what}");
+    }
+
+    /// <summary>Sets *every* candidate member that exists and takes a float (throws only if none do).</summary>
+    static void SetNumericsAll(object target, string[] candidates, float value, string what)
+    {
+        int set = 0;
+        foreach (string name in candidates)
+        {
+            if (FindMember(target.GetType(), name) is { } m && SetValue(m, target, value)) set++;
+        }
+
+        if (set == 0) throw new MissingFieldException(target.GetType().FullName, $"none of [{string.Join(", ", candidates)}] for {what}");
     }
 
     static bool SetNumeric(object target, string[] candidates, float value)

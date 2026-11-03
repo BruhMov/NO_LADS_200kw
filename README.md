@@ -13,9 +13,9 @@ feature off instead of crashing the plugin), same `[Mod]`-prefixed logger discip
 | File | Role |
 |---|---|
 | `Lads200.csproj` | Mirrors Centurion's csproj: `Private=false` references into your game's `Assembly-CSharp.dll`, `UnityEngine*.dll` and BepInEx's `BepInEx.dll` / `0Harmony.dll`. |
-| `Lads200Plugin.cs` | `[BepInPlugin("razor.lads200", ...)]` entry point; config entries (`Enabled`, `UnitName`, `UnitKey`, `CostDollars=10000000`, `PowerKw=200`); installs Harmony patches; drives registration from `Update`. |
-| `LadsClone.cs` | The heart: finds the stock MSV LADS in `Encyclopedia.Lookup`, `Object.Instantiate`-clones its definition *and* its prefab, sets `jsonKey="MSV_LADS_200"`, `unitName="MSV LADS 200"`, cost field (`emptyCost`/`cost`) = 10,000,000, sets each `Laser.power` 80→200 kW, tints the beam blue (serialized color field, else beam material `_BaseColor`/`_Color`), raises `PowerSupply.maxPower` to ≥200 kW, and adds the clone to the lookup + every typed Encyclopedia list its source is in. Clean rollback via `Disable()`. |
-| `SpawnGuard.cs` | Retry loop (twice a second until the encyclopedia loads, gives up after 120 s) plus the postfix every spawn hook gets: if a networked spawn request for our key ever lands before registration finished, register on the spot (the Centurion repo's "Unit Type not found in Encyclopedia" failure mode, handled without holding the main menu). |
+| `Lads200Plugin.cs` | `[BepInPlugin("razor.lads200", ...)]` entry point; config entries (`Enabled`, `UnitName`, `UnitKey`, `SourceKeyOverride`, `CostDollars=10000000`, `PowerKw=200`); installs Harmony patches; drives registration from `Update`. |
+| `LadsClone.cs` | The heart: finds the stock MSV LADS in `Encyclopedia.Lookup` (exact key, then tolerant case/underscore match, then unitName; logs candidate keys once if it never finds one), `Object.Instantiate`-clones its definition *and* its prefab (`unitPrefab` first, then `prefab` — field name verified against the PlayableVehicles repo), sets `jsonKey="MSV_LADS_200"`, `unitName="MSV LADS 200"`, **every** cost member that exists (`emptyCost`/`cost`/`value`) = 10,000,000 (encyclopedia shows one, PlayableVehicles charges `definition.value + ammo`), sets each `Laser.power` 80→200 kW, tints the beam blue, raises `PowerSupply.maxPower` ≥200 kW, joins every Encyclopedia list its source is in plus a cloned row in the `UnitType` category lists (`vehicleTypes` etc.), and runs a one-shot `menu-check:` diagnostic. Clean rollback via `Disable()`. |
+| `SpawnGuard.cs` | Retry loop (twice a second until the encyclopedia loads, gives up after 120 s) plus the postfix on every lifecycle hook SpawnHooks found. v1.0.5: the postfix only registers when the spawned Unit already carries a definition key, so Awake/OnEnable of an unspawned preview/pool instance of the stock prefab can never stamp the shared stock definition ("stock LADS turned into the 200" guard). |
 | `SpawnHooks.cs` | Patch discovery (v1.0.4): the v1.0.3 substring probe (formerly `SpawnProbe.cs`) found **0** spawn hooks because this game build's `Unit` declares no method containing "spawn"/"instantiate" — it dumped every Unit method into LogOutput.txt as a diagnostic. This file pins the real hooks read off that dump (`RegisterUnit`, `RegisterOnGridAsync`, `InitializeUnit`, plus the lifecycle callbacks `Awake`/`OnEnable`/`Start`/`OnStartServer`), validates each at runtime (single, non-special, void-returning; parameter-carrying ones must take a reference type) and patches only what resolves; if nothing resolves it dumps the method list again so the next build can re-pin. Field report v1.0.4: this build resolves exactly `Unit.Awake`, `Unit.OnEnable`, `Unit.OnStartServer` (the three lifecycle callbacks — the spawn-data candidates are overloaded/non-void and are skipped); that is sufficient since all three run once per spawned unit, and the log line now also names which candidates were skipped. |
 | `ModLog.cs`, `PatchTarget.cs` | Trimmed copies of Centurion's logging + patch-installation helpers. |
 
@@ -48,6 +48,24 @@ ilspycmd "<GameDir>\NuclearOption_Data\Managed\Assembly-CSharp.dll" -t UnitDefin
 ```
 
 Add any renamed field to the matching candidate array in `LadsClone.cs` and rebuild.
+
+## Troubleshooting: unit not visible (encyclopedia / PlayableVehicles shop)
+
+If the game loads with the plugin but the unit doesn't show in the encyclopedia or in the
+[PlayableVehicles](https://github.com/BruhMov/NO-PlayableVec-personal-mods) ground-vehicle shop (AAA tab), check
+`BepInEx\LogOutput.log` for these v1.0.5 lines:
+
+| Log line | Meaning | Fix |
+|---|---|---|
+| `registered 'MSV LADS 200' ...` | registration ran at all | if missing, look at the next two rows |
+| `source 'MSV_LADS' not found ... keys containing 'LADS': X, Y` | the stock unit's real encyclopedia key differs | set `SourceKeyOverride = X` in `razor.lads200.cfg` |
+| `feature off: MissingFieldException: none of [unitPrefab, prefab]` | definition shape moved | decompile with ilspycmd, extend `PrefabNames` |
+| `menu-check: clone prefab '...' GroundVehicle=NO` | PlayableVehicles filters out definitions whose prefab lacks `GroundVehicle` | report + check the source clone path |
+| `menu-check: clone present in 0 Encyclopedia list(s)` | the catalog lists aren't IList-visible fields | report; interim fix: Blueprinter-style asset instead |
+
+PlayableVehicles specifics (verified in its source): the shop catalog is exactly `Encyclopedia.i.vehicles`; entries are
+dropped unless `definition.unitPrefab.GetComponent<GroundVehicle>() != null`; the price charged is `definition.value +
+ammo value` — which is why v1.0.5 writes **all** cost members, not just the first one it finds.
 
 ## Notes / honest limits
 
