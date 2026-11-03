@@ -19,9 +19,10 @@ static class SpawnGuard
     const float GiveUpS = 120f;          // past this, stop retrying and stand the feature down (Centurion's MaxHoldS pattern)
 
     /// <summary>
-    /// Populated at plugin Awake by <see cref="SpawnProbe.Discover"/>: one entry per spawn/instantiate hook the game build
-    /// actually declares on Unit (the first release hardcoded Unit.InstantiateSpawn and hit MissingMethodException - the
-    /// probe finds the real name(s) at runtime instead of guessing them from a decompile).
+    /// Populated at plugin Awake by <see cref="SpawnHooks.Discover"/>: one entry per spawn/lifecycle hook the game build
+    /// actually declares on Unit (v1.0.0 hardcoded Unit.InstantiateSpawn and hit MissingMethodException; v1.0.3's substring
+    /// probe found 0 hooks - this build names none of them spawn/instantiate; the pinned list in SpawnHooks.cs resolves the
+    /// real ones, e.g. RegisterUnit / InitializeUnit / Awake / OnEnable / OnStartServer).
     /// </summary>
     internal static readonly List<PatchTarget> PatchTargets = new();
 
@@ -55,11 +56,11 @@ static class SpawnGuard
     }
 
     /// <summary>
-    /// Postfix on every spawn hook SpawnProbe found. Runs after the game instantiated/started a Unit; if that unit's prefab
+    /// Postfix on every spawn hook SpawnHooks found. Runs after the game instantiated/started a Unit; if that unit's prefab
     /// is ours (or named like our key) and registration has not finished yet, finish it right now so the encyclopedia entry
     /// exists before anything else can ask for it. Idempotent: once registered, this is a single cheap boolean test.
     /// </summary>
-    // public: SpawnProbe takes its MethodInfo with AccessTools.Method(typeof(SpawnGuard), nameof(AfterUnitSpawn)).
+    // internal: SpawnHooks takes its MethodInfo with AccessTools.Method(typeof(SpawnGuard), nameof(AfterUnitSpawn)).
     internal static void AfterUnitSpawn(object __instance)
     {
         // Parameter typed as `object` on purpose: Mirage (NetworkBehaviour, the base of Unit) lives in Managed\Mirage.dll
@@ -70,7 +71,8 @@ static class SpawnGuard
         string defKey = GetDefinitionKey(__instance);
         if (!IsOurs(goName) && !IsOurs(defKey)) return;
 
-        // A spawn of our prefab beat registration (only possible before the encyclopedia filled in): finish now, on the spot.
+        // A spawn (or Awake/OnEnable of our prefab's Unit) beat registration (only possible before the encyclopedia
+        // filled in): finish now, on the spot.
         try
         {
             if (LadsClone.TryRegister())

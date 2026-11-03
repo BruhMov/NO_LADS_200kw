@@ -19,7 +19,7 @@ namespace Lads200;
 public sealed class Lads200Plugin : BaseUnityPlugin
 {
     public const string Guid = "razor.lads200";
-    public const string Version = "1.0.2";
+    public const string Version = "1.0.4";
 
     internal static ModLog Log;
     internal static bool FeatureOff;
@@ -46,14 +46,16 @@ public sealed class Lads200Plugin : BaseUnityPlugin
         if (LadsClone.NewKey == LadsClone.SourceKey || LadsClone.NewKey.Length == 0)
         {
             DisableFeature($"UnitKey '{LadsClone.NewKey}' would collide with the stock MSV LADS");
+            return;
         }
 
         harmony = new Harmony(Guid);
-        // Discover the game build's real spawn hook(s) on Unit before building the patch table (1.0.0 hardcoded
-        // Unit.InstantiateSpawn and hit MissingMethodException; the probe finds whatever name this build declares).
-        SpawnProbe.Discover(SpawnGuard.PatchTargets, Log);
+        // Build the patch table from the spawn-hook names pinned against this game build (SpawnHooks.cs). The v1.0.3
+        // substring probe found 0 targets - Unit declares no method containing "spawn"/"instantiate" - so the guard ran
+        // without any hook; the pinned list resolves RegisterUnit/InitializeUnit/Awake/OnEnable/... at runtime instead.
+        SpawnHooks.Discover(SpawnGuard.PatchTargets, Log);
         var off = PatchTarget.InstallAll(harmony, SpawnGuard.PatchTargets, Log);
-        if (off.Count > 0)
+        if (off.Count >= SpawnGuard.PatchTargets.Count)
         {
             Log.Warning("spawn-guard: no usable spawn hook was patched in this game build; remote-peer spawn safety off - " +
                         "the unit still registers locally from the Update retry loop");
