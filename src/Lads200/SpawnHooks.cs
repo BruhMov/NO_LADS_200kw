@@ -10,12 +10,15 @@ namespace Lads200;
 /// Verified against that dump:
 ///   - Unit.RegisterUnit / RegisterOnGridAsync / InitializeUnit are the methods the game runs over each spawned unit;
 ///     their parameter types carry the definition (UnitDefinition) or the spawned object itself.
-///   - Unit.Awake / OnEnable / Start / OnDestroy / OnStartServer fire for every instantiated NetworkBehaviour, our clone
-///     included — exactly what AfterUnitSpawn needs to compare names/keys against. They are cheap idempotent guards, not
-///     per-frame code, so patching all of them costs nothing once registration finished.
+///   - Unit.Awake / OnEnable / OnStartServer fire for every instantiated NetworkBehaviour, our clone included.
+///     The v1.0.4 field report showed those three are the ONLY ones this build declares directly on Unit - RegisterUnit,
+///     RegisterOnGridAsync and InitializeUnit exist in the dump but do not pass the shape check below (overloaded, or not
+///     plain void with a reference parameter), so they are dropped silently. That is fine: Awake/OnEnable/OnStartServer
+///     still run once per spawned unit, which is everything AfterUnitSpawn needs.
 /// Every entry is validated at runtime before patching: a name must resolve on Unit itself to exactly one non-special,
-/// void-returning instance method. Anything else is skipped silently, so a future game update that moves or overloads a
-/// hook simply drops it instead of failing the plugin (PatchTarget.cs philosophy).
+/// void-returning instance method (spawn-data hooks additionally taking at least one reference-type parameter). Anything
+/// else is skipped silently, so a future game update that moves or overloads a hook simply drops it instead of failing
+/// the plugin (PatchTarget.cs philosophy).
 /// </summary>
 static class SpawnHooks
 {
@@ -39,7 +42,13 @@ static class SpawnHooks
     {
         targets.Clear();
 
-        foreach ((string name, bool requireRefParam) in Hooks) Add(targets, typeof(Unit), name, requireRefParam);
+        var foundNames = new List<string>();
+        var skippedNames = new List<string>();
+        foreach ((string name, bool requireRefParam) in Hooks)
+        {
+            if (Add(targets, typeof(Unit), name, requireRefParam)) foundNames.Add("Unit." + name);
+            else skippedNames.Add(name);
+        }
 
         if (targets.Count == 0)
         {
@@ -48,20 +57,20 @@ static class SpawnHooks
         }
         else
         {
-            var names = new List<string>();
-            foreach (PatchTarget p in targets) names.Add(p.Type.Name + "." + p.Method);
-            log.Info($"spawn-guard: found {targets.Count} spawn hook(s): " + string.Join(", ", names));
+            log.Info($"spawn-guard: found {targets.Count} spawn hook(s): " + string.Join(", ", foundNames)
+                     + $" (skipped, not resolvable as a single void instance method on Unit: {string.Join(", ", skippedNames)})");
         }
 
         return targets.Count;
     }
 
-    static void Add(List<PatchTarget> targets, Type type, string name, bool requireRefParam)
+    static bool Add(List<PatchTarget> targets, Type type, string name, bool requireRefParam)
     {
         MethodInfo m = Resolve(type, name, requireRefParam);
-        if (m == null) return;
+        if (m == null) return false;
         targets.Add(new PatchTarget(m.DeclaringType ?? type, m.Name, m.GetParameters(),
             postfix: HarmonyLib.AccessTools.Method(typeof(SpawnGuard), nameof(SpawnGuard.AfterUnitSpawn))));
+        return true;
     }
 
     /// <summary>Declared-only lookup (we know which type owns the method) with the sanity checks above.</summary>
