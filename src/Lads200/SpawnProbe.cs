@@ -12,7 +12,7 @@ namespace Lads200;
 /// enumerate at runtime every candidate method the game uses to instantiate a unit's prefab:
 ///   - declared or inherited (public/non-public, instance/static) on Unit whose name contains "spawn" or "instantiate",
 ///   - plus Mirage's NetworkBehaviour.OnStartServer / OnStartNetwork / OnSpawned hooks when Unit implements them.
-/// Each candidate gets a postfix that calls SpawnGuard.OnUnitSpawned(__instance); whichever hook fires first finishes the
+/// Each candidate gets a postfix that calls SpawnGuard.AfterUnitSpawn(__instance); whichever hook fires first finishes the
 /// registration during a spawn request, the others are harmless duplicates (the handler is idempotent). If NO candidate
 /// exists at all we log one diagnostic line listing every method declared on Unit, so the correct name can be read off the
 /// log and pinned here for the next game build.
