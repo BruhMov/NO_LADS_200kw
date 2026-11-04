@@ -1,6 +1,0 @@
-C:\Users\Bruh\Documents\Repos\NO\NO_LADS_200kw\src\Lads200\obj\Release\netstandard2.1\Lads200.csproj.AssemblyReference.cache
-C:\Users\Bruh\Documents\Repos\NO\NO_LADS_200kw\src\Lads200\obj\Release\netstandard2.1\Lads200.GeneratedMSBuildEditorConfig.editorconfig
-C:\Users\Bruh\Documents\Repos\NO\NO_LADS_200kw\src\Lads200\obj\Release\netstandard2.1\Lads200.AssemblyInfoInputs.cache
-C:\Users\Bruh\Documents\Repos\NO\NO_LADS_200kw\src\Lads200\obj\Release\netstandard2.1\Lads200.AssemblyInfo.cs
-C:\Users\Bruh\Documents\Repos\NO\NO_LADS_200kw\src\Lads200\obj\Release\netstandard2.1\Lads200.csproj.CoreCompileInputs.cache
-C:\Users\Bruh\Documents\Repos\NO\NO_LADS_200kw\src\Lads200\obj\Release\netstandard2.1\Lads200.sourcelink.json
